@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>实验室预约管理系统</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; background: #f0f2f5;
+           display: flex; justify-content: center; padding: 32px 16px; min-height: 100vh; }
+    .app { width: 100%; max-width: 860px; height: fit-content; }
+    h1 { font-size: 22px; text-align: center; margin-bottom: 20px; color: #333; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+    .tabs button { flex: 1; padding: 10px; border: none; border-radius: 8px; font-size: 15px;
+                   background: #e8e8e8; color: #555; cursor: pointer; }
+    .tabs button.active { background: #1677ff; color: #fff; }
+    .card { background: #fff; border-radius: 12px; padding: 24px;
+            box-shadow: 0 4px 16px rgba(0,0,0,.08); }
+    label { display: block; font-size: 14px; color: #555; margin: 14px 0 6px; }
+    input, select, textarea { width: 100%; padding: 10px 12px; border: 1px solid #d9d9d9;
+                              border-radius: 8px; font-size: 14px; outline: none; }
+    input:focus, select:focus, textarea:focus { border-color: #1677ff; }
+    .btn { margin-top: 18px; padding: 10px 24px; border: none; border-radius: 8px;
+           font-size: 15px; background: #1677ff; color: #fff; cursor: pointer; }
+    .btn:hover { background: #4096ff; }
+    .msg { margin-top: 14px; font-size: 14px; }
+    .msg.ok { color: #52c41a; }
+    .msg.err { color: #ff4d4f; }
+    .filters { display: flex; gap: 8px; margin-bottom: 14px; }
+    .filters select, .filters input { width: auto; flex: 1; margin: 0; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { padding: 10px 8px; text-align: left; border-bottom: 1px solid #f0f0f0; }
+    th { color: #888; font-weight: normal; white-space: nowrap; }
+    .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 12px; }
+    .badge.pending { background: #fff7e6; color: #d48806; }
+    .badge.approved { background: #f6ffed; color: #389e0d; }
+    .badge.rejected { background: #fff1f0; color: #cf1322; }
+    .link-btn { border: none; background: none; color: #1677ff; cursor: pointer; font-size: 13px; }
+    .link-btn.danger { color: #ff4d4f; }
+    .empty { text-align: center; color: #aaa; padding: 24px 0; font-size: 14px; }
+    .tip { margin-top: 16px; font-size: 12px; color: #aaa; text-align: center; }
+    .section-title { font-size: 16px; color: #333; margin: 4px 0 12px; }
+    .divider { margin-top: 24px; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <h1>实验室预约管理系统</h1>
+    <nav class="tabs">
+      <button data-tab="book" class="active">预约申请</button>
+      <button data-tab="records">预约记录</button>
+      <button data-tab="admin">管理后台</button>
+    </nav>
+
+    <!-- 预约申请 -->
+    <section id="tab-book" class="card">
+      <form id="book-form">
+        <label for="name">姓名</label>
+        <input id="name" required placeholder="请输入你的姓名">
+
+        <label for="lab">实验室</label>
+        <select id="lab"></select>
+
+        <label for="date">日期</label>
+        <input id="date" type="date" required>
+
+        <label for="slot">时段（已被占用的时段不可选）</label>
+        <select id="slot"></select>
+
+        <label for="purpose">预约用途</label>
+        <input id="purpose" required placeholder="例如：光学实验 / 课程教学">
+
+        <button class="btn" type="submit">提交预约</button>
+        <p class="msg" id="book-msg"></p>
+      </form>
+    </section>
+
+    <!-- 预约记录 -->
+    <section id="tab-records" class="card" hidden>
+      <div class="filters">
+        <select id="filter-lab"><option value="">全部实验室</option></select>
+        <input id="filter-date" type="date">
+      </div>
+      <div id="records-box"></div>
+    </section>
+
+    <!-- 管理后台 -->
+    <section id="tab-admin" class="card" hidden>
+      <div id="admin-login">
+        <p class="section-title">管理员登录</p>
+        <label for="admin-pwd">管理密码</label>
+        <input id="admin-pwd" type="password" placeholder="默认 admin123，见 data.js">
+        <button class="btn" id="admin-login-btn">登录</button>
+        <p class="msg" id="admin-msg"></p>
+      </div>
+      <div id="admin-panel" hidden>
+        <p class="section-title">待审核申请</p>
+        <div id="pending-box"></div>
+        <div class="divider">
+          <p class="section-title">全部预约记录</p>
+          <div id="all-box"></div>
+        </div>
+      </div>
+    </section>
+
+    <p class="tip">数据保存在本浏览器 localStorage 中；实验室与时段配置见 data.js</p>
+  </div>
+
+  <script src="data.js"></script>
+  <script>
+    const STORAGE_KEY = "lab_reservations_v1";
+    const NAME_KEY = "lab_user_name";
+    const AUTH_KEY = "lab_admin_auth";
+    const STATUS_TEXT = { pending: "待审核", approved: "已通过", rejected: "已驳回" };
+
+    // ---------- 工具 ----------
+    function escapeHtml(s) {
+      return String(s).replace(/[&<>"']/g, c =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    }
+    function dateStr(offsetDays) {
+      const d = new Date();
+      d.setDate(d.getDate() + offsetDays);
+      return d.toISOString().slice(0, 10);
+    }
+    function loadReservations() {
+      try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; }
+      catch (e) { return []; }
+    }
+    function saveReservations(list) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
+    }
+    // 首次运行写入示例数据，方便体验审核流程
+    function seedIfEmpty() {
+      if (localStorage.getItem(STORAGE_KEY)) return;
+      const now = Date.now();
+      saveReservations([
+        { id: now - 3, lab: LABS[0], date: dateStr(1), slot: TIME_SLOTS[0], name: "张三", purpose: "光学实验", status: "approved", createdAt: now - 30000 },
+        { id: now - 2, lab: LABS[1], date: dateStr(1), slot: TIME_SLOTS[2], name: "李四", purpose: "滴定实验", status: "pending", createdAt: now - 20000 },
+        { id: now - 1, lab: LABS[3], date: dateStr(2), slot: TIME_SLOTS[1], name: "王五", purpose: "程序设计课", status: "pending", createdAt: now - 10000 }
+      ]);
+    }
+
+    // ---------- 冲突检测：同一实验室+日期+时段，存在"待审核/已通过"即冲突 ----------
+    function findConflict(list, lab, date, slot, excludeId) {
+      return list.find(r =>
+        r.lab === lab && r.date === date && r.slot === slot &&
+        r.status !== "rejected" && r.id !== excludeId) || null;
+    }
+
+    // ---------- 选项卡切换 ----------
+    document.querySelectorAll(".tabs button").forEach(btn => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll(".tabs button").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+        ["book", "records", "admin"].forEach(t => {
+          document.getElementById("tab-" + t).hidden = t !== btn.dataset.tab;
+        });
+        if (btn.dataset.tab === "records") renderRecords();
+        if (btn.dataset.tab === "admin") renderAdmin();
+      });
+    });
+
+    // ---------- 预约申请 ----------
+    const labSel = document.getElementById("lab");
+    const dateInput = document.getElementById("date");
+    const slotSel = document.getElementById("slot");
+    const filterLab = document.getElementById("filter-lab");
+
+    LABS.forEach(l => {
+      labSel.add(new Option(l, l));
+      filterLab.add(new Option(l, l));
+    });
+    dateInput.min = dateStr(0);
+    dateInput.value = dateStr(1);
+
+    function renderSlotOptions() {
+      const list = loadReservations();
+      const lab = labSel.value, date = dateInput.value;
+      slotSel.innerHTML = "";
+      TIME_SLOTS.forEach(s => {
+        const conflict = date ? findConflict(list, lab, date, s) : null;
+        const opt = new Option(conflict ? s + "（已被占用）" : s, s);
+        opt.disabled = !!conflict;
+        slotSel.add(opt);
+      });
+    }
+    labSel.addEventListener("change", renderSlotOptions);
+    dateInput.addEventListener("change", renderSlotOptions);
+
+    document.getElementById("book-form").addEventListener("submit", e => {
+      e.preventDefault();
+      const name = document.getElementById("name").value.trim();
+      const purpose = document.getElementById("purpose").value.trim();
+      const lab = labSel.value, date = dateInput.value, slot = slotSel.value;
+      const msg = document.getElementById("book-msg");
+
+      if (!slot) { msg.className = "msg err"; msg.textContent = "该日期所有时段均已被约满，请换一天。"; return; }
+
+      const list = loadReservations();
+      const conflict = findConflict(list, lab, date, slot);
+      if (conflict) {
+        msg.className = "msg err";
+        msg.textContent = "冲突检测：该时段已被 " + conflict.name + " " +
+          (conflict.status === "approved" ? "预约成功" : "提交申请") + "，请选择其他时段。";
+        renderSlotOptions();
+        return;
+      }
+
+      list.push({ id: Date.now(), lab, date, slot, name, purpose, status: "pending", createdAt: Date.now() });
+      saveReservations(list);
+      localStorage.setItem(NAME_KEY, name);
+      msg.className = "msg ok";
+      msg.textContent = "提交成功！预约状态为“待审核”，可在“预约记录”中查看进度。";
+      document.getElementById("purpose").value = "";
+      renderSlotOptions();
+    });
+
+    // ---------- 预约记录 ----------
+    function badge(status) {
+      return `<span class="badge ${status}">${STATUS_TEXT[status]}</span>`;
+    }
+    function renderRecords() {
+      const myName = localStorage.getItem(NAME_KEY) || "";
+      const fl = filterLab.value, fd = document.getElementById("filter-date").value;
+      const list = loadReservations()
+        .filter(r => (!fl || r.lab === fl) && (!fd || r.date === fd))
+        .sort((a, b) => (a.date + a.slot).localeCompare(b.date + b.slot));
+
+      const box = document.getElementById("records-box");
+      if (!list.length) { box.innerHTML = `<p class="empty">暂无记录</p>`; return; }
+
+      box.innerHTML = `<table>
+        <tr><th>实验室</th><th>日期</th><th>时段</th><th>姓名</th><th>用途</th><th>状态</th><th></th></tr>
+        ${list.map(r => `<tr>
+          <td>${escapeHtml(r.lab)}</td><td>${r.date}</td><td>${r.slot}</td>
+          <td>${escapeHtml(r.name)}</td><td>${escapeHtml(r.purpose)}</td>
+          <td>${badge(r.status)}</td>
+          <td>${r.name === myName && r.status !== "rejected"
+              ? `<button class="link-btn danger" data-cancel="${r.id}">取消</button>` : ""}</td>
+        </tr>`).join("")}
+      </table>`;
+    }
+    filterLab.addEventListener("change", renderRecords);
+    document.getElementById("filter-date").addEventListener("change", renderRecords);
+    document.getElementById("records-box").addEventListener("click", e => {
+      const id = e.target.dataset.cancel;
+      if (!id) return;
+      if (!confirm("确定取消这条预约吗？")) return;
+      saveReservations(loadReservations().filter(r => String(r.id) !== id));
+      renderRecords();
+      renderSlotOptions();
+    });
+
+    // ---------- 管理后台 ----------
+    const loginBox = document.getElementById("admin-login");
+    const panel = document.getElementById("admin-panel");
+
+    document.getElementById("admin-login-btn").addEventListener("click", () => {
+      const pwd = document.getElementById("admin-pwd").value;
+      const msg = document.getElementById("admin-msg");
+      if (pwd === ADMIN_PASSWORD) {
+        sessionStorage.setItem(AUTH_KEY, "1");
+        msg.textContent = "";
+        renderAdmin();
+      } else {
+        msg.className = "msg err";
+        msg.textContent = "密码错误。";
+      }
+    });
+
+    function renderAdmin() {
+      const authed = sessionStorage.getItem(AUTH_KEY) === "1";
+      loginBox.hidden = authed;
+      panel.hidden = !authed;
+      if (!authed) return;
+
+      const list = loadReservations().sort((a, b) => b.createdAt - a.createdAt);
+      const pending = list.filter(r => r.status === "pending");
+
+      document.getElementById("pending-box").innerHTML = pending.length
+        ? `<table>
+            <tr><th>实验室</th><th>日期</th><th>时段</th><th>姓名</th><th>用途</th><th>操作</th></tr>
+            ${pending.map(r => `<tr>
+              <td>${escapeHtml(r.lab)}</td><td>${r.date}</td><td>${r.slot}</td>
+              <td>${escapeHtml(r.name)}</td><td>${escapeHtml(r.purpose)}</td>
+              <td>
+                <button class="link-btn" data-approve="${r.id}">通过</button>
+                <button class="link-btn danger" data-reject="${r.id}">驳回</button>
+              </td>
+            </tr>`).join("")}
+          </table>`
+        : `<p class="empty">暂无待审核申请</p>`;
+
+      document.getElementById("all-box").innerHTML = list.length
+        ? `<table>
+            <tr><th>实验室</th><th>日期</th><th>时段</th><th>姓名</th><th>用途</th><th>状态</th></tr>
+            ${list.map(r => `<tr>
+              <td>${escapeHtml(r.lab)}</td><td>${r.date}</td><td>${r.slot}</td>
+              <td>${escapeHtml(r.name)}</td><td>${escapeHtml(r.purpose)}</td><td>${badge(r.status)}</td>
+            </tr>`).join("")}
+          </table>`
+        : `<p class="empty">暂无记录</p>`;
+    }
+
+    document.getElementById("admin-panel").addEventListener("click", e => {
+      const { approve, reject } = e.target.dataset;
+      if (!approve && !reject) return;
+      const list = loadReservations();
+      const r = list.find(x => String(x.id) === (approve || reject));
+      if (!r) return;
+
+      if (approve) {
+        // 审核通过前再次冲突检测，防止数据异常导致重复占用
+        if (findConflict(list, r.lab, r.date, r.slot, r.id)) {
+          alert("审核失败：该时段已被其他预约占用。");
+          return;
+        }
+        r.status = "approved";
+      } else {
+        r.status = "rejected";
+      }
+      saveReservations(list);
+      renderAdmin();
+      renderSlotOptions();
+    });
+
+    // ---------- 初始化 ----------
+    seedIfEmpty();
+    document.getElementById("name").value = localStorage.getItem(NAME_KEY) || "";
+    renderSlotOptions();
+  </script>
+</body>
+</html>
