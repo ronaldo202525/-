@@ -8,7 +8,7 @@
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; background: #f0f2f5;
            display: flex; justify-content: center; padding: 32px 16px; min-height: 100vh; }
-    .app { width: 100%; max-width: 860px; height: fit-content; }
+    .app { width: 100%; max-width: 900px; height: fit-content; }
     h1 { font-size: 22px; text-align: center; margin-bottom: 20px; color: #333; }
     .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
     .tabs button { flex: 1; padding: 10px; border: none; border-radius: 8px; font-size: 15px;
@@ -35,6 +35,12 @@
     .badge.pending { background: #fff7e6; color: #d48806; }
     .badge.approved { background: #f6ffed; color: #389e0d; }
     .badge.rejected { background: #fff1f0; color: #cf1322; }
+    .badge.none { background: #f5f5f5; color: #595959; }
+    .badge.checked { background: #f6ffed; color: #389e0d; }
+    .badge.missed { background: #fff1f0; color: #cf1322; }
+    .badge.excused { background: #fff7e6; color: #d48806; }
+    .badge.restricted { background: #fff1f0; color: #cf1322; }
+    .code { font-size: 12px; color: #888; margin-top: 2px; }
     .link-btn { border: none; background: none; color: #1677ff; cursor: pointer; font-size: 13px; }
     .link-btn.danger { color: #ff4d4f; }
     .empty { text-align: center; color: #aaa; padding: 24px 0; font-size: 14px; }
@@ -49,6 +55,7 @@
     <nav class="tabs">
       <button data-tab="book" class="active">预约申请</button>
       <button data-tab="records">预约记录</button>
+      <button data-tab="checkin">预约签到</button>
       <button data-tab="admin">管理后台</button>
     </nav>
 
@@ -78,10 +85,22 @@
     <!-- 预约记录 -->
     <section id="tab-records" class="card" hidden>
       <div class="filters">
+        <input id="filter-keyword" type="search" placeholder="输入姓名 / 用途关键词查询">
         <select id="filter-lab"><option value="">全部实验室</option></select>
         <input id="filter-date" type="date">
       </div>
       <div id="records-box"></div>
+    </section>
+
+    <!-- 预约签到 -->
+    <section id="tab-checkin" class="card" hidden>
+      <p class="section-title">预约签到</p>
+      <label for="checkin-code">预约验证码</label>
+      <input id="checkin-code" placeholder="请输入 6 位验证码（审核通过后在预约记录中查看）"
+             maxlength="6" inputmode="numeric">
+      <button class="btn" id="checkin-btn">签到</button>
+      <p class="msg" id="checkin-msg"></p>
+      <p class="tip">签到时间为预约时段内；逾期未签到将被自动标记为爽约</p>
     </section>
 
     <!-- 管理后台 -->
@@ -97,13 +116,21 @@
         <p class="section-title">待审核申请</p>
         <div id="pending-box"></div>
         <div class="divider">
+          <p class="section-title">受限用户（爽约管控）</p>
+          <div id="restricted-box"></div>
+        </div>
+        <div class="divider">
+          <p class="section-title">爽约记录</p>
+          <div id="missed-box"></div>
+        </div>
+        <div class="divider">
           <p class="section-title">全部预约记录</p>
           <div id="all-box"></div>
         </div>
       </div>
     </section>
 
-    <p class="tip">数据保存在本浏览器 localStorage 中；实验室与时段配置见 data.js</p>
+    <p class="tip">数据保存在本浏览器 localStorage 中；实验室、时段、爽约上限等配置见 data.js</p>
   </div>
 
   <script src="data.js"></script>
@@ -112,6 +139,7 @@
     const NAME_KEY = "lab_user_name";
     const AUTH_KEY = "lab_admin_auth";
     const STATUS_TEXT = { pending: "待审核", approved: "已通过", rejected: "已驳回" };
+    const CHECKIN_TEXT = { none: "未签到", checked: "已签到", missed: "爽约", excused: "已免除" };
 
     // ---------- 工具 ----------
     function escapeHtml(s) {
@@ -123,22 +151,73 @@
       d.setDate(d.getDate() + offsetDays);
       return d.toISOString().slice(0, 10);
     }
+    function slotRange(date, slot) {
+      const [s, e] = slot.split("-");
+      return { start: new Date(date + "T" + s + ":00"), end: new Date(date + "T" + e + ":00") };
+    }
+    function currentSlot() {
+      const now = new Date();
+      const mins = now.getHours() * 60 + now.getMinutes();
+      return TIME_SLOTS.find(s => {
+        const [a, b] = s.split("-").map(t => { const [h, m] = t.split(":").map(Number); return h * 60 + m; });
+        return mins >= a && mins < b;
+      }) || null;
+    }
+    function genCode(list) {
+      let code;
+      do {
+        code = String(Math.floor(100000 + Math.random() * 900000));
+      } while (list.some(r => r.checkinCode === code));
+      return code;
+    }
+
     function loadReservations() {
-      try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; }
-      catch (e) { return []; }
+      let list = [];
+      try { list = JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch (e) {}
+      // 兼容旧数据：补齐签到相关字段
+      let changed = false;
+      list.forEach(r => {
+        if (!r.checkinStatus) { r.checkinStatus = "none"; changed = true; }
+        if (r.status === "approved" && !r.checkinCode) { r.checkinCode = genCode(list); changed = true; }
+      });
+      if (changed) saveReservations(list);
+      return list;
     }
     function saveReservations(list) {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(list));
     }
-    // 首次运行写入示例数据，方便体验审核流程
+
+    // 首次运行写入示例数据，方便体验完整流程
     function seedIfEmpty() {
       if (localStorage.getItem(STORAGE_KEY)) return;
       const now = Date.now();
+      const demoSlot = currentSlot() || TIME_SLOTS[0];
+      const demoDate = currentSlot() ? dateStr(0) : dateStr(1);
       saveReservations([
-        { id: now - 3, lab: LABS[0], date: dateStr(1), slot: TIME_SLOTS[0], name: "张三", purpose: "光学实验", status: "approved", createdAt: now - 30000 },
-        { id: now - 2, lab: LABS[1], date: dateStr(1), slot: TIME_SLOTS[2], name: "李四", purpose: "滴定实验", status: "pending", createdAt: now - 20000 },
-        { id: now - 1, lab: LABS[3], date: dateStr(2), slot: TIME_SLOTS[1], name: "王五", purpose: "程序设计课", status: "pending", createdAt: now - 10000 }
+        { id: now - 8, lab: LABS[0], date: dateStr(1), slot: TIME_SLOTS[0], name: "张三", purpose: "光学实验", status: "approved", checkinCode: "666666", checkinStatus: "none", createdAt: now - 80000 },
+        { id: now - 7, lab: LABS[1], date: dateStr(1), slot: TIME_SLOTS[2], name: "李四", purpose: "滴定实验", status: "pending", checkinStatus: "none", createdAt: now - 70000 },
+        { id: now - 6, lab: LABS[3], date: dateStr(2), slot: TIME_SLOTS[1], name: "王五", purpose: "程序设计课", status: "pending", checkinStatus: "none", createdAt: now - 60000 },
+        { id: now - 5, lab: LABS[2], date: demoDate, slot: demoSlot, name: "赵六", purpose: "签到演示", status: "approved", checkinCode: "888888", checkinStatus: "none", createdAt: now - 50000 },
+        { id: now - 4, lab: LABS[0], date: dateStr(-1), slot: TIME_SLOTS[0], name: "钱七", purpose: "演示爽约记录", status: "approved", checkinCode: "111111", checkinStatus: "missed", createdAt: now - 40000 },
+        { id: now - 3, lab: LABS[0], date: dateStr(-1), slot: TIME_SLOTS[2], name: "孙八", purpose: "演示受限用户", status: "approved", checkinCode: "222222", checkinStatus: "missed", createdAt: now - 30000 },
+        { id: now - 2, lab: LABS[1], date: dateStr(-1), slot: TIME_SLOTS[2], name: "孙八", purpose: "演示受限用户", status: "approved", checkinCode: "333333", checkinStatus: "missed", createdAt: now - 20000 },
+        { id: now - 1, lab: LABS[2], date: dateStr(-1), slot: TIME_SLOTS[0], name: "孙八", purpose: "演示受限用户", status: "approved", checkinCode: "444444", checkinStatus: "missed", createdAt: now - 10000 }
       ]);
+    }
+
+    // 爽约扫描：已通过的预约，时段结束仍未签到则标记为爽约
+    function sweepNoShows() {
+      const list = loadReservations();
+      const now = Date.now();
+      let changed = false;
+      list.forEach(r => {
+        if (r.status === "approved" && r.checkinStatus === "none" &&
+            now > slotRange(r.date, r.slot).end.getTime()) {
+          r.checkinStatus = "missed";
+          changed = true;
+        }
+      });
+      if (changed) saveReservations(list);
     }
 
     // ---------- 冲突检测：同一实验室+日期+时段，存在"待审核/已通过"即冲突 ----------
@@ -148,12 +227,20 @@
         r.status !== "rejected" && r.id !== excludeId) || null;
     }
 
+    // ---------- 爽约统计与限制 ----------
+    function missedCount(list, name) {
+      return list.filter(r => r.name === name && r.checkinStatus === "missed").length;
+    }
+    function isRestricted(list, name) {
+      return missedCount(list, name) >= MAX_NO_SHOW;
+    }
+
     // ---------- 选项卡切换 ----------
     document.querySelectorAll(".tabs button").forEach(btn => {
       btn.addEventListener("click", () => {
         document.querySelectorAll(".tabs button").forEach(b => b.classList.remove("active"));
         btn.classList.add("active");
-        ["book", "records", "admin"].forEach(t => {
+        ["book", "records", "checkin", "admin"].forEach(t => {
           document.getElementById("tab-" + t).hidden = t !== btn.dataset.tab;
         });
         if (btn.dataset.tab === "records") renderRecords();
@@ -175,6 +262,7 @@
     dateInput.value = dateStr(1);
 
     function renderSlotOptions() {
+      sweepNoShows();
       const list = loadReservations();
       const lab = labSel.value, date = dateInput.value;
       slotSel.innerHTML = "";
@@ -198,6 +286,15 @@
       if (!slot) { msg.className = "msg err"; msg.textContent = "该日期所有时段均已被约满，请换一天。"; return; }
 
       const list = loadReservations();
+
+      // 爽约管控：累计爽约达到上限，限制预约
+      if (isRestricted(list, name)) {
+        msg.className = "msg err";
+        msg.textContent = "爽约管控：你已累计爽约 " + missedCount(list, name) +
+          " 次，预约权限已被限制，请联系管理员解除。";
+        return;
+      }
+
       const conflict = findConflict(list, lab, date, slot);
       if (conflict) {
         msg.className = "msg err";
@@ -207,7 +304,8 @@
         return;
       }
 
-      list.push({ id: Date.now(), lab, date, slot, name, purpose, status: "pending", createdAt: Date.now() });
+      list.push({ id: Date.now(), lab, date, slot, name, purpose,
+                  status: "pending", checkinStatus: "none", createdAt: Date.now() });
       saveReservations(list);
       localStorage.setItem(NAME_KEY, name);
       msg.className = "msg ok";
@@ -220,22 +318,34 @@
     function badge(status) {
       return `<span class="badge ${status}">${STATUS_TEXT[status]}</span>`;
     }
+    function checkinCell(r, showCode) {
+      if (r.status !== "approved") return "—";
+      const b = `<span class="badge ${r.checkinStatus}">${CHECKIN_TEXT[r.checkinStatus]}</span>`;
+      const c = showCode && r.checkinCode ? `<div class="code">验证码：${r.checkinCode}</div>` : "";
+      return b + c;
+    }
     function renderRecords() {
+      sweepNoShows();
       const myName = localStorage.getItem(NAME_KEY) || "";
       const fl = filterLab.value, fd = document.getElementById("filter-date").value;
+      const kw = document.getElementById("filter-keyword").value.trim().toLowerCase();
       const list = loadReservations()
         .filter(r => (!fl || r.lab === fl) && (!fd || r.date === fd))
+        .filter(r => !kw ||
+          r.name.toLowerCase().includes(kw) ||
+          (r.purpose || "").toLowerCase().includes(kw))
         .sort((a, b) => (a.date + a.slot).localeCompare(b.date + b.slot));
 
       const box = document.getElementById("records-box");
       if (!list.length) { box.innerHTML = `<p class="empty">暂无记录</p>`; return; }
 
       box.innerHTML = `<table>
-        <tr><th>实验室</th><th>日期</th><th>时段</th><th>姓名</th><th>用途</th><th>状态</th><th></th></tr>
+        <tr><th>实验室</th><th>日期</th><th>时段</th><th>姓名</th><th>用途</th><th>状态</th><th>签到</th><th></th></tr>
         ${list.map(r => `<tr>
           <td>${escapeHtml(r.lab)}</td><td>${r.date}</td><td>${r.slot}</td>
           <td>${escapeHtml(r.name)}</td><td>${escapeHtml(r.purpose)}</td>
           <td>${badge(r.status)}</td>
+          <td>${checkinCell(r, r.name === myName)}</td>
           <td>${r.name === myName && r.status !== "rejected"
               ? `<button class="link-btn danger" data-cancel="${r.id}">取消</button>` : ""}</td>
         </tr>`).join("")}
@@ -243,6 +353,7 @@
     }
     filterLab.addEventListener("change", renderRecords);
     document.getElementById("filter-date").addEventListener("change", renderRecords);
+    document.getElementById("filter-keyword").addEventListener("input", renderRecords);
     document.getElementById("records-box").addEventListener("click", e => {
       const id = e.target.dataset.cancel;
       if (!id) return;
@@ -250,6 +361,41 @@
       saveReservations(loadReservations().filter(r => String(r.id) !== id));
       renderRecords();
       renderSlotOptions();
+    });
+
+    // ---------- 预约签到 ----------
+    document.getElementById("checkin-btn").addEventListener("click", () => {
+      const code = document.getElementById("checkin-code").value.trim();
+      const msg = document.getElementById("checkin-msg");
+      msg.className = "msg err";
+
+      if (!code) { msg.textContent = "请输入预约验证码。"; return; }
+
+      sweepNoShows();
+      const list = loadReservations();
+      const r = list.find(x => x.checkinCode === code && x.status === "approved");
+      if (!r) {
+        msg.textContent = "验证码无效，请核对后重试（审核通过后可在“预约记录”中查看你的验证码）。";
+        return;
+      }
+      if (r.checkinStatus === "checked") { msg.textContent = "该预约已完成签到，请勿重复操作。"; return; }
+      if (r.checkinStatus === "missed") { msg.textContent = "已超过签到时间，该预约已被标记为爽约。"; return; }
+
+      const { start, end } = slotRange(r.date, r.slot);
+      const now = new Date();
+      if (now < start) { msg.textContent = "未到签到时间，签到时间为 " + r.date + " " + r.slot + "。"; return; }
+      if (now > end) {
+        r.checkinStatus = "missed";
+        saveReservations(list);
+        msg.textContent = "已超过签到时间，该预约已被标记为爽约。";
+        return;
+      }
+
+      r.checkinStatus = "checked";
+      r.checkinAt = Date.now();
+      saveReservations(list);
+      msg.className = "msg ok";
+      msg.textContent = "签到成功！" + r.lab + " " + r.date + " " + r.slot + "，请按时使用实验室。";
     });
 
     // ---------- 管理后台 ----------
@@ -275,6 +421,7 @@
       panel.hidden = !authed;
       if (!authed) return;
 
+      sweepNoShows();
       const list = loadReservations().sort((a, b) => b.createdAt - a.createdAt);
       const pending = list.filter(r => r.status === "pending");
 
@@ -292,24 +439,66 @@
           </table>`
         : `<p class="empty">暂无待审核申请</p>`;
 
+      // 受限用户：累计爽约达到上限
+      const counts = {};
+      list.forEach(r => {
+        if (r.checkinStatus === "missed") counts[r.name] = (counts[r.name] || 0) + 1;
+      });
+      const restricted = Object.entries(counts).filter(([, c]) => c >= MAX_NO_SHOW);
+      document.getElementById("restricted-box").innerHTML = restricted.length
+        ? `<table>
+            <tr><th>姓名</th><th>爽约次数</th><th>状态</th><th>操作</th></tr>
+            ${restricted.map(([name, c]) => `<tr>
+              <td>${escapeHtml(name)}</td><td>${c}</td>
+              <td><span class="badge restricted">已限制预约</span></td>
+              <td><button class="link-btn" data-unrestrict="${escapeHtml(name)}">解除限制</button></td>
+            </tr>`).join("")}
+          </table>
+          <p class="tip">累计爽约达到 ${MAX_NO_SHOW} 次自动限制预约，解除限制后其爽约记录将标记为已免除</p>`
+        : `<p class="empty">暂无受限用户（累计爽约 ${MAX_NO_SHOW} 次自动限制）</p>`;
+
+      // 爽约记录
+      const missed = list.filter(r => r.checkinStatus === "missed" || r.checkinStatus === "excused");
+      document.getElementById("missed-box").innerHTML = missed.length
+        ? `<table>
+            <tr><th>姓名</th><th>实验室</th><th>日期</th><th>时段</th><th>状态</th></tr>
+            ${missed.map(r => `<tr>
+              <td>${escapeHtml(r.name)}</td><td>${escapeHtml(r.lab)}</td>
+              <td>${r.date}</td><td>${r.slot}</td>
+              <td><span class="badge ${r.checkinStatus}">${CHECKIN_TEXT[r.checkinStatus]}</span></td>
+            </tr>`).join("")}
+          </table>`
+        : `<p class="empty">暂无爽约记录</p>`;
+
       document.getElementById("all-box").innerHTML = list.length
         ? `<table>
-            <tr><th>实验室</th><th>日期</th><th>时段</th><th>姓名</th><th>用途</th><th>状态</th></tr>
+            <tr><th>实验室</th><th>日期</th><th>时段</th><th>姓名</th><th>用途</th><th>状态</th><th>签到</th></tr>
             ${list.map(r => `<tr>
               <td>${escapeHtml(r.lab)}</td><td>${r.date}</td><td>${r.slot}</td>
-              <td>${escapeHtml(r.name)}</td><td>${escapeHtml(r.purpose)}</td><td>${badge(r.status)}</td>
+              <td>${escapeHtml(r.name)}</td><td>${escapeHtml(r.purpose)}</td>
+              <td>${badge(r.status)}</td><td>${checkinCell(r, true)}</td>
             </tr>`).join("")}
           </table>`
         : `<p class="empty">暂无记录</p>`;
     }
 
     document.getElementById("admin-panel").addEventListener("click", e => {
-      const { approve, reject } = e.target.dataset;
-      if (!approve && !reject) return;
+      const { approve, reject, unrestrict } = e.target.dataset;
+      if (!approve && !reject && !unrestrict) return;
       const list = loadReservations();
+
+      if (unrestrict) {
+        if (!confirm("确定解除 " + unrestrict + " 的预约限制吗？其爽约记录将被标记为已免除。")) return;
+        list.forEach(r => {
+          if (r.name === unrestrict && r.checkinStatus === "missed") r.checkinStatus = "excused";
+        });
+        saveReservations(list);
+        renderAdmin();
+        return;
+      }
+
       const r = list.find(x => String(x.id) === (approve || reject));
       if (!r) return;
-
       if (approve) {
         // 审核通过前再次冲突检测，防止数据异常导致重复占用
         if (findConflict(list, r.lab, r.date, r.slot, r.id)) {
@@ -317,6 +506,8 @@
           return;
         }
         r.status = "approved";
+        r.checkinCode = genCode(list);   // 通过后生成预约验证码
+        r.checkinStatus = "none";
       } else {
         r.status = "rejected";
       }
@@ -327,6 +518,7 @@
 
     // ---------- 初始化 ----------
     seedIfEmpty();
+    sweepNoShows();
     document.getElementById("name").value = localStorage.getItem(NAME_KEY) || "";
     renderSlotOptions();
   </script>
